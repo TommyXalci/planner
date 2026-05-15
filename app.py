@@ -3,10 +3,9 @@ import sqlite3
 import pandas as pd
 from datetime import datetime
 
-# Nastavitve strani
-st.set_page_config(page_title="Moj Planer", layout="centered")
+# --- KONFIGURACIJA ---
+st.set_page_config(page_title="Moj Planer Pro", layout="centered")
 
-# Povezava z bazo
 conn = sqlite3.connect('opravila.db', check_same_thread=False)
 c = conn.cursor()
 c.execute('''CREATE TABLE IF NOT EXISTS naloge
@@ -15,16 +14,25 @@ c.execute('''CREATE TABLE IF NOT EXISTS naloge
               opravljeno INTEGER, arhivirano INTEGER DEFAULT 0, kategorija TEXT)''')
 conn.commit()
 
-st.title("📝 Moj Mobilni Planer")
+# --- POMOŽNE FUNKCIJE ---
+def posodobi_status(id_naloge, status):
+    c.execute("UPDATE naloge SET opravljeno=? WHERE id=?", (status, id_naloge))
+    conn.commit()
 
-# --- DODAJANJE (V RAZŠIRLJIVEM MENIJU) ---
-with st.expander("➕ Dodaj novo nalogo"):
-    novo_ime = st.text_input("Ime naloge")
+def izbrisi_nalogo(id_naloge):
+    c.execute("DELETE FROM naloge WHERE id=?", (id_naloge,))
+    conn.commit()
+
+# --- STRANSKI MENI (DODAJANJE) ---
+with st.sidebar:
+    st.header("➕ Nova naloga")
+    novo_ime = st.text_input("Ime nalog")
     nova_kat = st.selectbox("Kategorija", ["Splošno", "Šola", "Delo", "Dom", "Hobi"])
-    nova_prio = st.select_slider("Prioriteta", options=[1, 2, 3], format_func=lambda x: ["Visoka", "Srednja", "Nizka"][x-1])
+    nova_prio = st.select_slider("Prioriteta", options=[1, 2, 3], 
+                                 format_func=lambda x: ["Visoka", "Srednja", "Nizka"][x-1])
     nov_rok = st.date_input("Rok", datetime.now())
     
-    if st.button("Shrani nalogo"):
+    if st.button("Shrani v seznam"):
         if novo_ime:
             c.execute("INSERT INTO naloge (ime, prioriteta, rok, opravljeno, arhivirano, kategorija) VALUES (?, ?, ?, 0, 0, ?)",
                       (novo_ime, nova_prio, nov_rok.strftime("%d.%m.%Y"), nova_kat))
@@ -32,27 +40,39 @@ with st.expander("➕ Dodaj novo nalogo"):
             st.success("Dodano!")
             st.rerun()
 
-# --- PRIKAZ IN UPRAVLJANJE ---
-tab1, tab2 = st.tabs(["📋 Aktivno", "📦 Arhiv"])
+# --- GLAVNI VMESNIK ---
+st.title("📝 Moj Pametni Planer")
+
+# Statistika v vrstici
+c.execute("SELECT COUNT(*) FROM naloge WHERE arhivirano=0 AND opravljeno=0")
+st.write(f"Aktivnih nalog: **{c.fetchone()[0]}**")
+
+tab1, tab2, tab3 = st.tabs(["📋 Seznam", "🔍 Iskanje", "📦 Arhiv"])
 
 with tab1:
-    # Pridobimo podatke
-    df = pd.read_sql_query("SELECT id, kategorija, ime, prioriteta, rok FROM naloge WHERE arhivirano=0 AND opravljeno=0", conn)
+    # Filtri za prikaz
+    prikaz_kat = st.multiselect("Filtriraj kategorije", ["Splošno", "Šola", "Delo", "Dom", "Hobi"])
     
-    if not df.empty:
-        for index, row in df.iterrows():
-            with st.container():
-                col1, col2 = st.columns([0.8, 0.2])
-                prio_oznaka = "🔴" if row['prioriteta'] == 1 else ("🟡" if row['prioriteta'] == 2 else "🔵")
-                col1.write(f"{prio_oznaka} **{row['ime']}** ({row['kategorija']})")
-                col1.caption(f"Rok: {row['rok']}")
-                if col2.button("✔️", key=f"btn_{row['id']}"):
-                    c.execute("UPDATE naloge SET opravljeno=1 WHERE id=?", (row['id'],))
-                    conn.commit()
-                    st.rerun()
-                st.divider()
+    query = "SELECT * FROM naloge WHERE arhivirano=0 AND opravljeno=0"
+    if prikaz_kat:
+        query += f" AND kategorija IN ({','.join(['?']*len(prikaz_kat))})"
+        df = pd.read_sql_query(query, conn, params=prikaz_kat)
     else:
-        st.info("Ni aktivnih nalog.")
+        df = pd.read_sql_query(query, conn)
+
+    if not df.empty:
+        for _, row in df.iterrows():
+            with st.expander(f"{'🔴' if row['prioriteta']==1 else '🔵'} {row['ime']} | {row['kategorija']}"):
+                col1, col2, col3 = st.columns(3)
+                col1.write(f"📅 Rok: {row['rok']}")
+                if col2.button("✔️ Opravljeno", key=f"done_{row['id']}"):
+                    posodobi_status(row['id'], 1)
+                    st.rerun()
+                if col3.button("🗑️ Izbriši", key=f"del_{row['id']}"):
+                    izbrisi_nalogo(row['id'])
+                    st.rerun()
+    else:
+        st.info("Seznam je prazen. Čas za kavo! ☕")
 
     if st.button("🚀 Arhiviraj opravljene"):
         c.execute("UPDATE naloge SET arhivirano=1 WHERE opravljeno=1")
@@ -60,5 +80,12 @@ with tab1:
         st.rerun()
 
 with tab2:
-    arhiv_df = pd.read_sql_query("SELECT kategorija, ime, rok FROM naloge WHERE arhivirano=1", conn)
-    st.dataframe(arhiv_df, use_container_width=True, hide_index=True)
+    iskanje = st.text_input("Vpiši del imena...")
+    if iskanje:
+        res = pd.read_sql_query("SELECT * FROM naloge WHERE ime LIKE ?", conn, params=(f"%{iskanje}%",))
+        st.dataframe(res, use_container_width=True)
+
+with tab3:
+    st.write("Zgodovina arhiviranih nalog:")
+    arhiv_df = pd.read_sql_query("SELECT kategorija, ime, rok FROM naloge WHERE arhivirano=1 ORDER BY id DESC", conn)
+    st.table(arhiv_df)
